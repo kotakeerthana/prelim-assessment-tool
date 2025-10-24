@@ -1,0 +1,25 @@
+# -------------------------------------
+# ENVIRONMENT AND BUILD FILES
+# -------------------------------------
+# Ignore the entire Python virtual environment folder
+/venv
+/.venv
+# Ignore auto-generated Python files
+__pycache__/
+*.pyc
+
+# -------------------------------------
+# SECURITY AND SECRETS
+# -------------------------------------
+# Streamlit secrets file (CRITICAL to exclude)
+/.streamlit/secrets.toml
+# Any general environment variables file
+.env
+
+# -------------------------------------
+# LOCAL/EPHEMERAL DATA
+# -------------------------------------
+# Local SQLite database file (Supabase is the primary store)
+patient_logs.db
+# Files often created by Mac OS (if applicable)
+.DS_Store
