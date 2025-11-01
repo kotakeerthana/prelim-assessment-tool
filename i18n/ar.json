@@ -1,0 +1,22 @@
+{
+  "app.title": "أداة التقييم الأولي",
+  "nav.language": "اللغة",
+
+  "report.title": "تقييم أولي بمساعدة الذكاء الاصطناعي",
+  "report.overview": "الملخص",
+  "report.key_findings": "النتائج الرئيسية",
+
+  "misc.estimated_risk": "الخطورة المقدّرة",
+
+  "vitals.label": "العلامات الحيوية",
+  "vitals.hr": "النبض",
+  "vitals.sbp": "انقباضي",
+  "vitals.dbp": "انبساطي",
+
+  "risk.low": "منخفضة",
+  "risk.moderate": "متوسطة",
+  "risk.high": "مرتفعة",
+
+  "redflag.hypotension_sbp": "انخفاض ضغط (انقباضي < 90 مم زئبق)",
+  "redflag.tachypnea_marked": "تسرّع نفس ملحوظ"
+}

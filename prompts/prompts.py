@@ -13,27 +13,29 @@ Rules:
 )
 
 PROMPT_TEMPLATE = Template(
-    """
-Return ONLY valid JSON with these exact keys (strings allowed):
-{
-  "overview": "...",
-  "key_findings": "...",
-  "differentials": "...",
-  "risk_assessment": "...",
-  "next_steps": "...",
-  "red_flags": "...",
-  "limitations": "...",
-  "references": "..."
-}
+"""
+{{ system_prompt }}
+
+You must return exactly one JSON object with these keys:
+overview, key_findings, differentials, risk_assessment, next_steps, red_flags, limitations, references.
+
+Language rules:
+- Write ALL narrative values entirely in {{ language_name }}. Do not use English words.
+- If input contains English phrases, translate them into {{ language_name }}.
+- Keep JSON keys in English exactly as specified.
+
+Content rules:
+- Use only the provided severity value. Do not infer a different severity. Do not duplicate severity.
+- Use non-diagnostic wording with differential phrasing, for example "consider", "consistent with", "unlikely".
+- Keep content concise and clinically useful.
 
 Context:
-- Specialty: {{ specialty }}
-- Patient data (JSON):
+- Specialty code: {{ specialty }}
+- Patient data JSON:
 {{ patient_json }}
 
 Constraints:
-- JSON ONLY. No backticks, no extra prose.
-- Non-diagnostic language. Use differential wording (e.g., "consider", "consistent with", "unlikely").
-- Keep concise and clinically useful.
+- Return JSON only. No backticks. No extra text outside the JSON.
 """
+
 )

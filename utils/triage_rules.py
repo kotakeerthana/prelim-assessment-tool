@@ -1,5 +1,5 @@
 # utils/triage_rules.py
-from typing import Dict, Any, List, Callable, Tuple
+from typing import Dict, Any, List, Callable, Tuple, Optional
 
 Rule = Tuple[str, Callable[[Dict[str, Any], List[str], Dict[str, Any] | None], bool]]
 
@@ -39,40 +39,67 @@ def _suspect_gi_bleed(vit: Dict[str,Any], s: List[str], labs: Dict[str,Any] | No
 # -------- specialty bundles --------
 SPECIALTY_RULES: Dict[str, List[Rule]] = {
     "cardiology": [
-        ("Chest pain with hypotension", lambda vit, s, labs: (_v(vit,"systolic_bp",999) < 90) and any(x in s for x in ["chest pain","syncope","shortness of breath","dyspnea"])),
+        # include English + Spanish variants so it works in either UI language
+        ("Chest pain with hypotension",
+         lambda vit, s, labs: (_v(vit, "systolic_bp", 999) < 90)
+         and any(x in s for x in [
+             "chest pain", "heart pain", "syncope",
+             "shortness of breath", "dyspnea",
+             "opresión torácica", "dolor torácico", "disnea"
+         ])),
     ],
     "neurology": [
-        ("New focal neuro deficit",     lambda vit, s, labs: any(x in s for x in ["weakness","facial droop","aphasia","vision loss"])),
-        ("Syncope (evaluate for trauma and causes)", lambda vit, s, labs: "syncope" in s),
+        ("New focal neuro deficit",
+         lambda vit, s, labs: any(x in s for x in ["weakness", "facial droop", "aphasia", "vision loss"])),
+        ("Syncope (evaluate for trauma and causes)",
+         lambda vit, s, labs: "syncope" in s),
     ],
     "endocrinology": [
-        ("Suspected DKA by labs/symptoms", lambda vit, s, labs: _suspect_dka(vit,s,labs)),
+        ("Suspected DKA by labs/symptoms",
+         lambda vit, s, labs: _suspect_dka(vit, s, labs)),
     ],
     "gastroenterology": [
-        ("UGIB features (melena/hematemesis + hypotension)", lambda vit, s, labs: _suspect_gi_bleed(vit,s,labs)),
+        ("UGIB features (melena/hematemesis + hypotension)",
+         lambda vit, s, labs: _suspect_gi_bleed(vit, s, labs)),
     ],
     "dermatology": [
-        ("High fever with skin infection pattern",  lambda vit, s, labs: _v(vit,"temperature_c",0) > 39.5 and any(x in s for x in ["cellulitis","erysipelas","skin infection"])),
+        ("High fever with skin infection pattern",
+         lambda vit, s, labs: _v(vit, "temperature_c", 0) > 39.5
+         and any(x in s for x in ["cellulitis", "erysipelas", "skin infection"])),
     ],
     "oncology": [
-        ("Possible febrile neutropenia/sepsis",    lambda vit, s, labs: _suspect_sepsis(vit,s,labs)),
+        ("Possible febrile neutropenia/sepsis",
+         lambda vit, s, labs: _suspect_sepsis(vit, s, labs)),
     ],
-    "general practice/internal medicine": [
-        ("Hypoxia or hypotension present",          lambda vit, s, labs: (_v(vit,"spo2",100) < 90) or (_v(vit,"systolic_bp",999) < 90)),
+    # ⬇️ renamed to the code you use in the app (gp_im)
+    "gp_im": [
+        ("Hypoxia or hypotension present",
+         lambda vit, s, labs: (_v(vit, "spo2", 100) < 90) or (_v(vit, "systolic_bp", 999) < 90)),
     ],
 }
 
 def _match_bundle(specialty: str) -> List[Rule]:
+    """
+    Match by exact code (e.g., 'cardiology', 'gp_im').
+    The app now stores patient.specialty as a code, not a phrase.
+    """
     spec = (specialty or "").strip().lower()
-    for key, rules in SPECIALTY_RULES.items():
-        if key in spec:
-            return rules
-    return []  # default none
+    return SPECIALTY_RULES.get(spec, [])
 
 def collect_red_flags(specialty: str, vitals: Dict[str, Any], symptoms: List[str], labs: Dict[str, Any] | None = None) -> List[str]:
     s = [x.lower() for x in (symptoms or [])]
     flags: List[str] = []
+    hr = (vitals or {}).get("heart_rate")
+    rr = (vitals or {}).get("respiratory_rate")
+    sbp = (vitals or {}).get("systolic_bp")
+    spo2 = (vitals or {}).get("spo2")
+    temp = (vitals or {}).get("temperature_c")
 
+    if sbp is not None and sbp < 90: flags.append("Hipotensión (PAS < 90 mmHg)")
+    if hr is not None and hr > 120: flags.append("Taquicardia marcada (FC > 120 lpm)")
+    if rr is not None and rr > 30: flags.append("Taquipnea marcada (FR > 30/min)")
+    if spo2 is not None and spo2 < 92: flags.append("Sat. O₂ baja (SpO₂ < 92%)")
+    if temp is not None and temp >= 39.0: flags.append("Fiebre alta (T ≥ 39.0 °C)")
     # absolute → always apply
     for label, fn in ABSOLUTE_RULES:
         try:
@@ -88,17 +115,61 @@ def collect_red_flags(specialty: str, vitals: Dict[str, Any], symptoms: List[str
     # lab-driven cross-specialty catches (optional universal checks)
     if _suspect_dka(vitals, s, labs): flags.append("Suspected DKA (labs/symptoms)")
     if _suspect_sepsis(vitals, s, labs): flags.append("Sepsis possible (vitals pattern)")
+    temp = (vitals or {}).get("temperature_c")
+    if temp is not None and temp >= 38.0:
+        flags.append("Fever (≥ 38.0 °C)")
 
     return sorted(set(flags))
 
-def naive_risk_bucket(vitals: Dict[str, Any], red_flags: List[str]) -> str:
-    if red_flags: return "High"
-    hr = vitals.get("heart_rate") or 0
-    temp = vitals.get("temperature_c") or 0
-    sbp = vitals.get("systolic_bp") or 999
-    moderate = sum([
-        hr > 110,
-        38.5 < temp <= 39.5,
-        90 <= sbp < 100,
+def naive_risk_bucket(entities, vitals, complaint: Optional[str] = None, severity: Optional[int] = None) -> str:
+    """
+    Conservative rule-based bucket:
+    - HIGH: any hard instability; or ACS-pattern chest pain with severity >=8/10 or 'crushing'/radiating cues.
+    - MODERATE: fever >=38.0 °C OR (>=37.8 °C with focal abdominal pain); or chest-pain-like + moderate abnormalities.
+    - otherwise LOW.
+    """
+    bucket = "Low"
+
+    sx = set([s.lower() for s in (entities or {}).get("symptoms", [])])
+    complaint_txt = (complaint or "").lower()
+
+    hr  = (vitals or {}).get("heart_rate")
+    rr  = (vitals or {}).get("respiratory_rate")
+    sbp = (vitals or {}).get("systolic_bp")
+    spo2= (vitals or {}).get("spo2")
+    temp= (vitals or {}).get("temperature_c")
+
+    # Immediate HIGH: hard danger
+    if (sbp is not None and sbp < 90) or (spo2 is not None and spo2 < 90):
+        return "High"
+    if (rr is not None and rr > 30) or (hr is not None and hr > 130) or (temp is not None and temp < 35.0):
+        return "High"
+
+    # ACS → HIGH even with normal vitals
+    chest_like = any(k in sx or k in complaint_txt for k in [
+        "chest pain", "heart pain", "opresión torácica", "dolor torácico",
+        "dor torácica", "douleur thoracique", "胸痛"
     ])
-    return "Moderate" if moderate >= 2 else "Low"
+    acs_cues = any(k in complaint_txt for k in [
+        "crushing", "压榨", "opresivo", "oppressive", "radiating to left arm",
+        "irrad", "diaphoresis", "sweating", "shortness of breath",
+        "dyspnea", "disnea", "dispneia", "ضيق التنفس"
+    ])
+    if chest_like and ((severity or 0) >= 8 or acs_cues):
+        return "High"
+
+    # Fever → at least MODERATE
+    if temp is not None and temp >= 38.0:
+        return "Moderate"
+    if (temp is not None and temp >= 37.8) and any(k in complaint_txt for k in [
+        "rlq", "right lower quadrant", "lower right quadrant",
+        "right iliac fossa", "append", "abdominal pain", "dolor abdominal",
+        "dor abdominal", "douleur abdominale", "ألم بطني", "右下腹", "右下象限"
+    ]):
+        return "Moderate"
+
+    # Chest pain + moderate abnormalities
+    if chest_like and ((hr and hr > 100) or (rr and rr > 24) or (spo2 and spo2 < 92) or (temp and temp >= 38.0)):
+        return "Moderate"
+
+    return bucket

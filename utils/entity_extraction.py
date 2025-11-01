@@ -3,6 +3,7 @@ from typing import Dict, List
 import os
 import re
 import pandas as pd
+import json
 
 # ---- Optional lightweight NER via scispaCy (auto-fallback to regex) ----
 try:

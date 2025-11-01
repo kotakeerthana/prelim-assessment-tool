@@ -2,9 +2,15 @@ from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 
 Specialty = Literal[
-"Cardiology", "Oncology", "Neurology", "Endocrinology",
-"Gastroenterology", "Dermatology", "General Practice/Internal Medicine", "Other"
-]
+        "cardiology",
+        "oncology",
+        "neurology",
+        "endocrinology",
+        "gastroenterology",
+        "dermatology",
+        "gp_im",
+        "other"
+    ]
 
 class Vitals(BaseModel):
     heart_rate: Optional[int] = Field(None, ge=0, le=300)

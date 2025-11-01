@@ -1,27 +1,30 @@
- {{ title }}
- Specialty: {{ specialty }}
- Generated: {{ generated_at }}
- ---
- ## Overview
- {{ overview }}
+<h2>{{ title }}</h2>
+<p>
+  <strong>{{ head_specialty }}</strong>: {{ specialty_label }}
+  &nbsp;|&nbsp;
+  <strong>{{ head_generated_at }}</strong>: {{ generated_at }}
+</p>
 
- ## Key Findings
- {{ key_findings }}
+<h3>{{ head_overview }}</h3>
+<p>{{ overview }}</p>
 
- ## Differentials
- {{ differentials }}
+<h3>{{ head_key_findings }}</h3>
+<pre>{{ key_findings }}</pre>
 
- ## Risk Assessment
- {{ risk_assessment }}
+<h3>{{ head_differentials }}</h3>
+<pre>{{ differentials }}</pre>
 
- ## Next Steps
- {{ next_steps }}
+<h3>{{ head_risk_assessment }}</h3>
+<pre>{{ risk_assessment }}</pre>
 
- ## Red Flags
- {{ red_flags }}
+<h3>{{ head_next_steps }}</h3>
+<pre>{{ next_steps }}</pre>
 
- ## Limitations & Uncertainty
- {{ limitations }}
+<h3>{{ head_red_flags }}</h3>
+<pre>{{ red_flags }}</pre>
 
- ## References
- {{ references }}
+<h3>{{ head_limitations }}</h3>
+<pre>{{ limitations }}</pre>
+
+<h3>{{ head_references }}</h3>
+<pre>{{ references }}</pre>

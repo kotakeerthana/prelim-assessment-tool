@@ -1,8 +1,9 @@
-# llm/llm_client.py
 from typing import Literal, Optional
 import os
 import requests
 import streamlit as st
+from utils.i18n import language_name
+
 
 Provider = Literal["gemini", "openai"]
 
