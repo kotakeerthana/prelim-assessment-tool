@@ -1,5 +1,7 @@
 import pytest
 
+from utils.triage_rules import strict_risk_bucket
+
 from utils.triage_rules import naive_risk_bucket, collect_red_flags
 
 def test_chest_pain_crushing_severity_10_is_high():
@@ -28,3 +30,25 @@ def test_collect_red_flags_includes_fever_when_38_or_more():
     flags = collect_red_flags("General Practice/Internal Medicine", vitals, entities.get("symptoms", []), labs=None)
     # Depending on where you added fever flag, assert any one that should appear:
     assert any(("Fever" in f) or ("Fiebre" in f) or ("Fièvre" in f) or ("发热" in f) for f in flags)
+
+
+def test_cardiology_troponin_or_st_depression_forces_high():
+    entities = {"symptoms": ["shortness of breath"]}
+    vitals = {"heart_rate": 96, "respiratory_rate": 22, "systolic_bp": 158, "spo2": 94, "temperature_c": 36.8}
+    complaint = "Intermittent pressure-like chest discomfort radiating to the left arm"
+    labs_text = "Troponin I: mildly elevated"
+    imaging_text = "ECG shows ST-segment depression in lateral leads"
+
+    bucket, reasons = strict_risk_bucket(
+        specialty="cardiology",
+        vitals=vitals,
+        entities=entities,
+        complaint=complaint,
+        severity=7,
+        labs_text=labs_text,
+        imaging_text=imaging_text,
+        red_flags=[],
+    )
+
+    assert bucket == "High"
+    assert any(("Troponin" in r) or ("ECG" in r) for r in reasons)

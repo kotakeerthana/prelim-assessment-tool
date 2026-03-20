@@ -173,3 +173,104 @@ def naive_risk_bucket(entities, vitals, complaint: Optional[str] = None, severit
         return "Moderate"
 
     return bucket
+
+def strict_risk_bucket(
+    specialty: str,
+    vitals: Dict[str, Any],
+    entities: Dict[str, Any],
+    complaint: Optional[str] = None,
+    severity: Optional[int] = None,
+    labs_text: Optional[str] = None,
+    imaging_text: Optional[str] = None,
+    other_tests_text: Optional[str] = None,
+    red_flags: Optional[List[str]] = None,
+) -> Tuple[str, List[str]]:
+    """
+    Deterministic conservative risk bucket with reasons.
+    Buckets: Low, Moderate, High
+
+    Key principle: If something suggests immediate harm, bucket must be High
+    even if vitals are not "crashing".
+    """
+
+    reasons: List[str] = []
+    spec = (specialty or "").strip().lower()
+
+    sx = set([s.lower() for s in (entities or {}).get("symptoms", [])])
+    complaint_txt = (complaint or "").lower()
+
+    labs_blob = (labs_text or "").lower()
+    img_blob = (imaging_text or "").lower()
+    other_blob = (other_tests_text or "").lower()
+
+    hr  = (vitals or {}).get("heart_rate")
+    rr  = (vitals or {}).get("respiratory_rate")
+    sbp = (vitals or {}).get("systolic_bp")
+    spo2= (vitals or {}).get("spo2")
+    temp= (vitals or {}).get("temperature_c")
+
+    # 1) Any red flags => High
+    if red_flags:
+        reasons.append("Red flags present")
+        return "High", reasons
+
+    # 2) Hard instability (same as naive, but with reasons)
+    if (sbp is not None and sbp < 90) or (spo2 is not None and spo2 < 90):
+        reasons.append("Hard instability (SBP < 90 or SpO₂ < 90)")
+        return "High", reasons
+    if (rr is not None and rr > 30) or (hr is not None and hr > 130) or (temp is not None and temp < 35.0):
+        reasons.append("Hard instability (RR > 30, HR > 130, or hypothermia)")
+        return "High", reasons
+
+    # 3) Cardiology overrides using labs/imaging text
+    if spec == "cardiology":
+        chest_like = any(k in sx or k in complaint_txt for k in [
+            "chest pain", "heart pain", "opresión torácica", "dolor torácico",
+            "dor torácica", "douleur thoracique", "胸痛"
+        ])
+        radiation_or_sob = any(k in complaint_txt for k in [
+            "radiating", "irrad", "left arm", "jaw",
+            "shortness of breath", "dyspnea", "disnea", "dispneia"
+        ])
+
+        troponin_elev = ("troponin" in labs_blob) and any(k in labs_blob for k in [
+            "elevat", "positive", "high", "raised", "mildly elevated", "above", "↑"
+        ])
+
+        st_dep = any(k in img_blob for k in [
+            "st-segment depression", "st segment depression", "st depression"
+        ])
+        st_elev = any(k in img_blob for k in [
+            "st elevation", "st-segment elevation", "stemi"
+        ])
+
+        if troponin_elev:
+            reasons.append("Troponin described as elevated")
+            return "High", reasons
+        if st_elev or st_dep:
+            reasons.append("ECG described with ST changes")
+            return "High", reasons
+        if chest_like and radiation_or_sob and (severity or 0) >= 7:
+            reasons.append("High-risk chest pain pattern (pain + radiation/SOB + severity ≥ 7)")
+            return "High", reasons
+
+        # Moderate cardiology triggers
+        if chest_like and (severity or 0) >= 5:
+            reasons.append("Chest pain with moderate severity")
+            return "Moderate", reasons
+        if chest_like and ((hr and hr > 100) or (rr and rr > 24) or (spo2 and spo2 <= 94)):
+            reasons.append("Chest pain with abnormal vitals")
+            return "Moderate", reasons
+
+    # 4) General moderate triggers (same spirit as naive)
+    if temp is not None and temp >= 38.0:
+        reasons.append("Fever ≥ 38.0°C")
+        return "Moderate", reasons
+    if (hr is not None and hr > 100) or (rr is not None and rr > 24):
+        reasons.append("Abnormal vitals")
+        return "Moderate", reasons
+    if (severity or 0) >= 7:
+        reasons.append("High symptom severity")
+        return "Moderate", reasons
+
+    return "Low", reasons

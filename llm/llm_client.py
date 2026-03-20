@@ -4,22 +4,69 @@ import requests
 import streamlit as st
 from utils.i18n import language_name
 
-
 Provider = Literal["gemini", "openai"]
+
 
 class LLMClient:
     def __init__(self):
         cfg = st.secrets.get("api", {})
-        self.provider: Provider = cfg.get("provider", "gemini")
+
+        # Normalize provider so "Gemini" or " gemini " does not break logic
+        self.provider: Provider = (cfg.get("provider", "gemini") or "gemini").strip().lower()  # type: ignore
+
         self.gemini_key = cfg.get("gemini_api_key") or os.getenv("GEMINI_API_KEY", "")
         self.openai_key = cfg.get("openai_api_key") or os.getenv("OPENAI_API_KEY", "")
 
+        # IMPORTANT: default must be a model your key actually supports
+        # Your key lists models like: models/gemini-pro-latest, models/gemini-flash-latest, models/gemini-2.5-pro, etc.
+        self.gemini_model = cfg.get("model") or os.getenv("GEMINI_MODEL", "models/gemini-flash-latest")
+        if self.gemini_model and not self.gemini_model.startswith("models/"):
+            self.gemini_model = f"models/{self.gemini_model}"
+
+        self.gemini_model = self._normalize_gemini_model(self.gemini_model)
+
+        self.openai_model = cfg.get("openai_model") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    def _normalize_gemini_model(self, model: str) -> str:
+        """
+        The google.generativeai SDK expects model names like 'models/gemini-pro-latest'.
+        This normalizes common inputs so you never hit avoidable 404s.
+        """
+        m = (model or "").strip()
+        if not m:
+            return "models/gemini-pro-latest"
+        if m.startswith("models/"):
+            return m
+        return f"models/{m}"
+
     def generate(self, prompt: str, model: Optional[str] = None) -> str:
         if self.provider == "gemini":
-            return self._gemini_generate(prompt, model or "gemini-1.5-flash")
-        elif self.provider == "openai":
-            return self._openai_generate(prompt, model or "gpt-4o-mini")
+            chosen = model or self.gemini_model
+            if chosen and not chosen.startswith("models/"):
+                chosen = f"models/{chosen}"
+            return self._gemini_generate(prompt, chosen)
+
+
+        if self.provider == "openai":
+            return self._openai_generate(prompt, model or self.openai_model)
+
         return "[LLM Error: Unknown provider]"
+
+    def list_gemini_models(self) -> str:
+        if not self.gemini_key:
+            return "[LLM Error: Missing GEMINI_API_KEY]"
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self.gemini_key)
+            models = genai.list_models()
+            lines = []
+            for m in models:
+                name = getattr(m, "name", "")
+                methods = getattr(m, "supported_generation_methods", []) or []
+                lines.append(f"{name} | {methods}")
+            return "\n".join(lines) if lines else "(No models returned)"
+        except Exception as e:
+            return f"[LLM Error: {e}]"
 
     def _gemini_generate(self, prompt: str, model: str) -> str:
         if not self.gemini_key:
@@ -32,7 +79,7 @@ class LLMClient:
                 model_name=model,
                 generation_config={
                     "temperature": 0.2,
-                    # This is the KEY bit: tell Gemini to return JSON only
+                    # Prefer JSON output (your report_generation expects JSON)
                     "response_mime_type": "application/json",
                 },
             )
@@ -43,7 +90,7 @@ class LLMClient:
             if getattr(resp, "text", None):
                 return resp.text.strip()
 
-            # 2) Try candidates/parts just in case
+            # 2) Fallback: candidates/parts
             try:
                 parts = []
                 for cand in getattr(resp, "candidates", []) or []:

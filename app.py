@@ -18,7 +18,13 @@ from utils.db import log_record
 from llm.llm_client import LLMClient
 from prompts.prompts import BASE_SYSTEM_PROMPT, PROMPT_TEMPLATE
 from utils.i18n import t, set_lang, get_lang, SUPPORTED, language_name
-
+from utils.document_extract import extract_text_from_upload
+from utils.report_generation import (
+    detect_language_code,
+    generate_comment_conclusion_references,
+)
+from utils.pdf_export import build_results_pdf_bytes
+from utils.triage_rules import strict_risk_bucket 
 
 # =========================
 # Page config
@@ -315,6 +321,17 @@ def spec_label(code: str) -> str:
 # =========================
 st.sidebar.header("⚙️ Settings & Status")
 provider = st.sidebar.selectbox("LLM Provider", ["gemini", "openai"], index=0)
+
+# Create one LLM client globally so it is available to both the main form and the upload feature
+if "llm_client" not in st.session_state:
+    st.session_state["llm_client"] = LLMClient()
+
+llm_client = st.session_state["llm_client"]
+llm_client.provider = provider
+
+with st.sidebar.expander("Debug: Gemini models available to this API key"):
+    st.code(llm_client.list_gemini_models())
+
 use_llm_triage = st.sidebar.checkbox(
     "Use LLM triage (experimental)",
     value=False,
@@ -337,6 +354,12 @@ with st.sidebar:
     )
     set_lang(chosen_lang)
 
+#st.sidebar.divider()
+#mode = st.sidebar.radio(
+#    "Input mode",
+#    options=["Manual entry", "Upload report"],
+#    index=0,
+#)
 
 
 # =========================
@@ -345,6 +368,7 @@ with st.sidebar:
 st.markdown("# 🩺 " + t("app.title"))
 st.caption("Educational demo. Not medical advice. Verify with clinical judgment and guidelines.")
 
+tab_manual, tab_upload = st.tabs(["Manual entry", "Upload report"])
 
 # =========================
 # Data / lookups
@@ -358,374 +382,481 @@ toggle = getattr(st, "toggle", st.checkbox)
 # =========================
 # Form
 # =========================
-with st.form("patient_form"):
-    st.subheader(t("section.specialty"))
-    specialty = st.selectbox(t("form.specialty_label"), SPECIALTIES, format_func=spec_label)
+with tab_manual:
 
-    st.subheader(t("section.demographics"))
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        patient_id = st.text_input(t("form.patient_id"))
-        age = st.number_input(t("form.age"), min_value=0, max_value=120, step=1, format="%d")
-    with c2:
-        sex = st.selectbox(t("form.sex"), ["Female", "Male", "Intersex", "Other", "Unknown"])
-        race_ethnicity = st.text_input(t("form.race"))
-    with c3:
-        weight_kg = st.number_input(t("form.weight"), min_value=0.0, max_value=500.0, step=0.1)
-        height_cm = st.number_input(t("form.height"), min_value=0.0, max_value=260.0, step=0.1)
-    with c4:
-        bmi = st.number_input(t("form.bmi"), min_value=0.0, max_value=100.0, step=0.1)
+    with st.form("patient_form"):
+        st.subheader(t("section.specialty"))
+        specialty = st.selectbox(t("form.specialty_label"), SPECIALTIES, format_func=spec_label)
 
-    st.subheader(t("section.hpi"))
-    complaint = st.text_area(t("form.complaint"))
-    duration = st.text_input(t("form.duration"))
-    severity_1_10 = st.slider(t("form.severity"), min_value=1, max_value=10, value=5)
-    associated_symptoms = st.text_area(t("form.assoc_symptoms"))
+        st.subheader(t("section.demographics"))
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            patient_id = st.text_input(t("form.patient_id"))
+            age = st.number_input(t("form.age"), min_value=0, max_value=120, step=1, format="%d")
+        with c2:
+            sex = st.selectbox(t("form.sex"), ["Female", "Male", "Intersex", "Other", "Unknown"])
+            race_ethnicity = st.text_input(t("form.race"))
+        with c3:
+            weight_kg = st.number_input(t("form.weight"), min_value=0.0, max_value=500.0, step=0.1)
+            height_cm = st.number_input(t("form.height"), min_value=0.0, max_value=260.0, step=0.1)
+        with c4:
+            bmi = st.number_input(t("form.bmi"), min_value=0.0, max_value=100.0, step=0.1)
 
-    st.subheader(t("section.pmh"))
-    pmh = st.text_area(t("form.pmh"))
-    surgical_history = st.text_area(t("form.surg"))
-    medications = st.text_area(t("form.meds"))
-    allergies = st.text_area(t("form.allergies"))
-    family_history = st.text_area(t("form.family"))
+        st.subheader(t("section.hpi"))
+        complaint = st.text_area(t("form.complaint"))
+        duration = st.text_input(t("form.duration"))
+        severity_1_10 = st.slider(t("form.severity"), min_value=1, max_value=10, value=5)
+        associated_symptoms = st.text_area(t("form.assoc_symptoms"))
 
-    st.subheader(t("section.lifestyle"))
-    smoking_status = st.text_input(t("form.smoking"))
-    alcohol_consumption = st.text_input(t("form.alcohol"))
-    illicit_drug_use = st.text_input(t("form.drugs"))
+        st.subheader(t("section.pmh"))
+        pmh = st.text_area(t("form.pmh"))
+        surgical_history = st.text_area(t("form.surg"))
+        medications = st.text_area(t("form.meds"))
+        allergies = st.text_area(t("form.allergies"))
+        family_history = st.text_area(t("form.family"))
 
-    st.subheader(t("section.vitals"))
-    colv1, colv2, colv3, colv4, colv5, colv6 = st.columns(6)
-    with colv1:
-        hr = st.number_input(t("form.hr"), min_value=0, max_value=300, step=1)
-    with colv2:
-        sbp = st.number_input(t("form.sbp"), min_value=50, max_value=260, step=1)
-    with colv3:
-        dbp = st.number_input(t("form.dbp"), min_value=30, max_value=160, step=1)
-    with colv4:
-        rr = st.number_input(t("form.rr"), min_value=0, max_value=80, step=1)
-    with colv5:
-        tempc = st.number_input(t("form.temp"), min_value=30.0, max_value=45.0, step=0.1)
-    with colv6:
-        spo2 = st.number_input(t("form.spo2"), min_value=0, max_value=100, step=1)
+        st.subheader(t("section.lifestyle"))
+        smoking_status = st.text_input(t("form.smoking"))
+        alcohol_consumption = st.text_input(t("form.alcohol"))
+        illicit_drug_use = st.text_input(t("form.drugs"))
 
-    st.subheader(t("form.labs"))
-    labs = st.text_area(t("form.labs"))
-    imaging = st.text_area(t("form.imaging"))
-    other_tests = st.text_area(t("form.other_tests"))
+        st.subheader(t("section.vitals"))
+        colv1, colv2, colv3, colv4, colv5, colv6 = st.columns(6)
+        with colv1:
+            hr = st.number_input(t("form.hr"), min_value=0, max_value=300, step=1)
+        with colv2:
+            sbp = st.number_input(t("form.sbp"), min_value=50, max_value=260, step=1)
+        with colv3:
+            dbp = st.number_input(t("form.dbp"), min_value=30, max_value=160, step=1)
+        with colv4:
+            rr = st.number_input(t("form.rr"), min_value=0, max_value=80, step=1)
+        with colv5:
+            tempc = st.number_input(t("form.temp"), min_value=30.0, max_value=45.0, step=0.1)
+        with colv6:
+            spo2 = st.number_input(t("form.spo2"), min_value=0, max_value=100, step=1)
 
-    st.subheader(t("misc.storage_privacy"))
-    anonymize = toggle(
-        "Anonymize & Save",
-        value=False,
-        help="If ON, will hash Patient ID and avoid storing direct identifiers.",
+        st.subheader(t("form.labs"))
+        labs = st.text_area(t("form.labs"))
+        imaging = st.text_area(t("form.imaging"))
+        other_tests = st.text_area(t("form.other_tests"))
+
+        st.subheader(t("misc.storage_privacy"))
+        anonymize = toggle(
+            "Anonymize & Save",
+            value=False,
+            help="If ON, will hash Patient ID and avoid storing direct identifiers.",
+        )
+
+        submitted = st.form_submit_button(t("section.submit"))
+
+
+    # =========================
+    # Submission handling
+    # =========================
+    if submitted:
+        try:
+            vitals = Vitals(
+                heart_rate=hr or None,
+                systolic_bp=sbp or None,
+                diastolic_bp=dbp or None,
+                respiratory_rate=rr or None,
+                temperature_c=tempc or None,
+                spo2=spo2 or None,
+            )
+            patient = PatientInput(
+                patient_id=patient_id or None,
+                specialty=specialty,  # type: ignore
+                age=int(age) if age else None,
+                sex=sex,
+                race_ethnicity=race_ethnicity or None,
+                weight_kg=float(weight_kg) if weight_kg else None,
+                height_cm=float(height_cm) if height_cm else None,
+                bmi=float(bmi) if bmi else None,
+                complaint=complaint or None,
+                duration=duration or None,
+                severity_1_10=int(severity_1_10),
+                associated_symptoms=associated_symptoms or None,
+                pmh=pmh or None,
+                surgical_history=surgical_history or None,
+                medications=medications or None,
+                allergies=allergies or None,
+                family_history=family_history or None,
+                smoking_status=smoking_status or None,
+                alcohol_consumption=alcohol_consumption or None,
+                illicit_drug_use=illicit_drug_use or None,
+                vitals=vitals,
+                labs=labs or None,
+                imaging=imaging or None,
+                other_tests=other_tests or None,
+            )
+
+            # --- Vital sign sanity checks & warnings ---
+            warnings = []
+
+            def warn_if(cond, msg):
+                if cond:
+                    warnings.append(msg)
+
+            # Typical adult ranges (adjust to your population if needed)
+            warn_if(patient.vitals.heart_rate and patient.vitals.heart_rate > 100,
+                    "Taquicardia: FC > 100 lpm.")
+            warn_if(patient.vitals.respiratory_rate and patient.vitals.respiratory_rate > 24,
+                    "Taquipnea: FR > 24/min.")
+            warn_if(patient.vitals.systolic_bp and patient.vitals.systolic_bp < 90,
+                    "Hipotensión: PAS < 90 mmHg.")
+            warn_if(patient.vitals.temperature_c and patient.vitals.temperature_c >= 38.0,
+                    "Fiebre: T ≥ 38.0 °C.")
+            warn_if(patient.vitals.spo2 and patient.vitals.spo2 < 92,
+                    "Hipoxemia: SpO₂ < 92%.")
+
+            if warnings:
+                st.warning(" • " + "\n • ".join(warnings))
+
+            # --- Entity extraction
+            free_text = "\n".join(
+                x for x in [
+                    patient.complaint, patient.associated_symptoms, patient.pmh,
+                    patient.medications, patient.allergies
+                ] if x
+            )
+            ents_dict = extract_entities(free_text)
+            ents = Entities(**ents_dict)
+
+            st.subheader(t("misc.entities_extracted"))
+            st.code(json.dumps(ents_dict, ensure_ascii=False, indent=2))
+
+                    # --- Parse labs (beta)
+            labs_metrics = parse_labs(labs or "")
+
+            # Normalize labs to a dict for triage rules
+            if isinstance(labs_metrics, list):
+                labs_struct = labs_metrics[0] if labs_metrics else {}
+            elif isinstance(labs_metrics, dict):
+                labs_struct = labs_metrics
+            else:
+                labs_struct = {}
+
+            with st.expander(t("misc.parsed_labs")):
+                st.json(labs_metrics)  # show whatever came back
+
+            # --- Red flags & risk
+            vitals_dict = patient.vitals.model_dump() if patient.vitals else {}
+            red_flags = collect_red_flags(patient.specialty, vitals_dict, ents_dict.get("symptoms", []), labs_struct)
+           
+            risk_bucket, risk_reasons = strict_risk_bucket(
+                specialty=patient.specialty,
+                vitals=vitals_dict,
+                entities=ents_dict,
+                complaint=patient.complaint,
+                severity=patient.severity_1_10,
+                labs_text=patient.labs,
+                imaging_text=patient.imaging,
+                other_tests_text=patient.other_tests,
+                red_flags=red_flags,
+            )
+            
+            # Vital sanity hints
+            for msg in vital_issues(vitals_dict):
+                st.warning(msg)
+
+            rf_local = _localize_red_flags(red_flags)
+            if rf_local:
+                st.error("🚩 " + t("report.red_flags") + ": " + "; ".join(rf_local))
+
+            bucket_label = {
+                "Low": t("risk.low"),
+                "Moderate": t("risk.moderate"),
+                "High": t("risk.high"),
+            }.get(risk_bucket, risk_bucket)
+            st.info(t("misc.estimated_risk") + f": {bucket_label}")
+            if risk_reasons:
+                with st.expander("Why this risk level?"):
+                    for r in risk_reasons:
+                        st.write(f"- {r}")
+
+            # --- PubMed evidence (smarter query + curated fallback)
+            query = build_pubmed_query(patient.specialty, patient.complaint, ents.symptoms)
+            refs = search_pubmed(query, max_results=3)
+            st.subheader(" 📚 " + t("misc.evidence"))
+            if refs:
+                st.table(pd.DataFrame(refs))
+            else:
+                st.caption("No PubMed hits with current filters; using curated guideline references below.")
+            curated_refs = curated_guidelines(patient.specialty, patient.complaint, ents.symptoms)
+
+            # --- LLM prompt (strict JSON demanded in PROMPT_TEMPLATE)
+            #llm_client = LLMClient()
+            #llm_client.provider = provider
+
+            condensed = {
+                "specialty": patient.specialty,
+                "complaint": patient.complaint,
+                "duration": patient.duration,
+                "severity": patient.severity_1_10,
+                "sex": patient.sex,
+                "age": patient.age,
+                "vitals": vitals_dict,
+                "entities": ents_dict,
+                "red_flags": red_flags,
+                "risk": risk_bucket,
+            }
+            prompt = PROMPT_TEMPLATE.render(
+                system_prompt=BASE_SYSTEM_PROMPT,
+                patient_json=json.dumps(condensed, ensure_ascii=False),
+                specialty=patient.specialty,
+                language_name=language_name()
+        )
+
+
+            with st.spinner("Generating summary..."):
+                llm_text = llm_client.generate(prompt)
+
+            with st.expander("LLM raw output"):
+                st.code(llm_text or "(empty)")
+
+            # --- Prefer JSON, fallback to default rule-based summary
+            parsed = try_parse_llm_json(llm_text)
+            if parsed:
+                parsed = _translate_llm_json_if_needed(parsed, language_name(), llm_client)
+                overview        = parsed.get("overview", "")
+                key_findings    = parsed.get("key_findings", "")
+                differentials   = parsed.get("differentials", "")
+                risk_assessment = parsed.get("risk_assessment", "")
+                next_steps      = parsed.get("next_steps", "")
+                red_flags_txt   = parsed.get("red_flags", "")
+                limitations     = parsed.get("limitations", "")
+                references_txt  = compose_references_text("", refs, parsed.get("references"))
+            else:
+                defaults = default_sections(patient, ents, risk_bucket, red_flags)
+                overview        = defaults["overview"]
+                key_findings    = defaults["key_findings"]
+                differentials   = defaults["differentials"]
+                risk_assessment = defaults["risk_assessment"]
+                next_steps      = defaults["next_steps"]
+                red_flags_txt   = defaults["red_flags"]
+                limitations     = defaults["limitations"]
+                references_txt  = compose_references_text("", refs, None)
+
+            # --- Merge LLM-suggested triage with rules (optional)
+            def _norm_risk(s: Optional[str]):
+                if not s:
+                    return None
+                s = s.lower()
+                if "high" in s:
+                    return "High"
+                if "moderate" in s or "intermediate" in s:
+                    return "Moderate"
+                if "low" in s:
+                    return "Low"
+                return None
+
+            if parsed and use_llm_triage:
+                # Parse LLM "red_flags" (string or list)
+                lf_raw = parsed.get("red_flags", "")
+                if isinstance(lf_raw, str):
+                    parts = [p.strip() for p in re.split(r"[\n;,•]+", lf_raw) if p.strip()]
+                    llm_flags = parts
+                elif isinstance(lf_raw, list):
+                    llm_flags = [str(x).strip() for x in lf_raw if str(x).strip()]
+                else:
+                    llm_flags = []
+
+                # Merge: rules + LLM
+                red_flags = sorted(set(red_flags + llm_flags))
+
+                # Risk: take the stricter one
+                order = {"Low": 0, "Moderate": 1, "High": 2}
+                llm_risk = _norm_risk(parsed.get("risk_assessment"))
+                if llm_risk:
+                    risk_bucket = ["Low", "Moderate", "High"][max(order.get(risk_bucket, 0), order[llm_risk])]
+
+                # Always reflect the final merged rule in the text shown
+                rf_local = _localize_red_flags(red_flags)
+                red_flags_txt = ", ".join(rf_local) if rf_local else t("default.no_redflags", "None elicited.")
+                risk_assessment = t("misc.estimated_risk") + f": {bucket_label}."
+
+            # References fallback to curated list if still empty
+            if (not references_txt or references_txt.strip() == "(None provided)") and curated_refs:
+                references_txt = "\n".join(curated_refs)
+
+            specialty_label = spec_label(patient.specialty)
+
+            # --- Render report via Jinja2 template
+            tmpl_path = os.path.join("templates", "report_template.j2")
+            with open(tmpl_path, "r", encoding="utf-8") as f:
+                report_tmpl = Template(f.read())
+            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            specialty_label = spec_label(patient.specialty)
+            report = report_tmpl.render(
+                title=t("report.title"),
+                specialty_label=specialty_label,
+                generated_at=now,
+                head_overview=t("report.overview"),
+                head_key_findings=t("report.key_findings"),
+                head_differentials=t("report.differentials"),
+                head_risk_assessment=t("report.risk_assessment"),
+                head_next_steps=t("report.next_steps"),
+                head_red_flags=t("report.red_flags"),
+                head_limitations=t("report.limitations"),
+                head_references=t("report.references"),
+                head_specialty=t("report.specialty"),
+                head_generated_at=t("report.generated_at"),
+                overview=overview,
+                key_findings=key_findings,
+                differentials=differentials,
+                risk_assessment=risk_assessment,
+                next_steps=next_steps,
+                red_flags=red_flags_txt,
+                limitations=limitations,
+                references=references_txt,
+            )
+            st.subheader("📝 Generated Report")
+            st.markdown(report, unsafe_allow_html=True)
+
+            # --- Optional logging
+            if anonymize:
+                pid_stored = hashlib.sha256((patient.patient_id or "").encode()).hexdigest()[:10] if patient.patient_id else None
+            else:
+                pid_stored = patient.patient_id
+
+            record = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "patient_id": pid_stored,
+                "specialty": patient.specialty,
+                "age": patient.age,
+                "sex": patient.sex,
+                "race_ethnicity": patient.race_ethnicity,
+                "weight": patient.weight_kg,
+                "height": patient.height_cm,
+                "bmi": patient.bmi,
+                "complaint": patient.complaint,
+                "duration": patient.duration,
+                "severity": patient.severity_1_10,
+                "assoc_symptoms": patient.associated_symptoms,
+                "pmh": patient.pmh,
+                "surg_hx": patient.surgical_history,
+                "meds": patient.medications,
+                "allergies": patient.allergies,
+                "fam_hx": patient.family_history,
+                "smoking": patient.smoking_status,
+                "alcohol": patient.alcohol_consumption,
+                "drugs": patient.illicit_drug_use,
+                "vitals": json.dumps(vitals_dict),
+                "labs": patient.labs,
+                "imaging": patient.imaging,
+                "other_tests": patient.other_tests,
+                "entities": json.dumps(ents_dict),
+                "pubmed_refs": json.dumps(refs),
+                "report_raw": llm_text,
+                "report_rendered": report,
+            }
+            try:
+                log_record(record)
+                st.success("Saved (opt-in logging).")
+            except Exception as e:
+                st.warning(f"Could not save: {e}")
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+# END Manual entry
+with tab_upload:
+
+    st.divider()
+    st.header("📄 Upload report and generate Comments, Conclusion, References")
+
+    st.caption(
+        "Upload a PDF or DOCX report. The tool extracts text and generates a non diagnostic summary. "
+        "Graphs inside PDFs are usually images, so the model relies on the report text that describes results."
     )
 
-    submitted = st.form_submit_button(t("section.submit"))
-
-
-# =========================
-# Submission handling
-# =========================
-if submitted:
-    try:
-        vitals = Vitals(
-            heart_rate=hr or None,
-            systolic_bp=sbp or None,
-            diastolic_bp=dbp or None,
-            respiratory_rate=rr or None,
-            temperature_c=tempc or None,
-            spo2=spo2 or None,
-        )
-        patient = PatientInput(
-            patient_id=patient_id or None,
-            specialty=specialty,  # type: ignore
-            age=int(age) if age else None,
-            sex=sex,
-            race_ethnicity=race_ethnicity or None,
-            weight_kg=float(weight_kg) if weight_kg else None,
-            height_cm=float(height_cm) if height_cm else None,
-            bmi=float(bmi) if bmi else None,
-            complaint=complaint or None,
-            duration=duration or None,
-            severity_1_10=int(severity_1_10),
-            associated_symptoms=associated_symptoms or None,
-            pmh=pmh or None,
-            surgical_history=surgical_history or None,
-            medications=medications or None,
-            allergies=allergies or None,
-            family_history=family_history or None,
-            smoking_status=smoking_status or None,
-            alcohol_consumption=alcohol_consumption or None,
-            illicit_drug_use=illicit_drug_use or None,
-            vitals=vitals,
-            labs=labs or None,
-            imaging=imaging or None,
-            other_tests=other_tests or None,
+    with st.form("upload_report_form"):
+        uploaded = st.file_uploader(
+            "Upload a PDF or Word document (DOCX)",
+            type=["pdf", "docx"],
+            accept_multiple_files=False,
         )
 
-        # --- Vital sign sanity checks & warnings ---
-        warnings = []
-
-        def warn_if(cond, msg):
-            if cond:
-                warnings.append(msg)
-
-        # Typical adult ranges (adjust to your population if needed)
-        warn_if(patient.vitals.heart_rate and patient.vitals.heart_rate > 100,
-                "Taquicardia: FC > 100 lpm.")
-        warn_if(patient.vitals.respiratory_rate and patient.vitals.respiratory_rate > 24,
-                "Taquipnea: FR > 24/min.")
-        warn_if(patient.vitals.systolic_bp and patient.vitals.systolic_bp < 90,
-                "Hipotensión: PAS < 90 mmHg.")
-        warn_if(patient.vitals.temperature_c and patient.vitals.temperature_c >= 38.0,
-                "Fiebre: T ≥ 38.0 °C.")
-        warn_if(patient.vitals.spo2 and patient.vitals.spo2 < 92,
-                "Hipoxemia: SpO₂ < 92%.")
-
-        if warnings:
-            st.warning(" • " + "\n • ".join(warnings))
-
-        # --- Entity extraction
-        free_text = "\n".join(
-            x for x in [
-                patient.complaint, patient.associated_symptoms, patient.pmh,
-                patient.medications, patient.allergies
-            ] if x
+        lang_options = list(SUPPORTED.keys())
+        output_lang = st.selectbox(
+            "Output language",
+            options=["auto"] + lang_options,
+            index=0,
+            format_func=lambda k: "Auto (same as document)" if k == "auto" else f"{SUPPORTED[k]} ({k})",
         )
-        ents_dict = extract_entities(free_text)
-        ents = Entities(**ents_dict)
 
-        st.subheader(t("misc.entities_extracted"))
-        st.code(json.dumps(ents_dict, ensure_ascii=False, indent=2))
+        run_upload = st.form_submit_button("Submit")
 
-                # --- Parse labs (beta)
-        labs_metrics = parse_labs(labs or "")
-
-        # Normalize labs to a dict for triage rules
-        if isinstance(labs_metrics, list):
-            labs_struct = labs_metrics[0] if labs_metrics else {}
-        elif isinstance(labs_metrics, dict):
-            labs_struct = labs_metrics
+    if run_upload:
+        if not uploaded:
+            st.warning("Please upload a PDF or DOCX file.")
         else:
-            labs_struct = {}
+            with st.spinner("Extracting text and generating output..."):
+                report_text = extract_text_from_upload(uploaded)
+                with st.expander("Debug: extracted text (first 2000 chars)"):
+                    st.code(report_text[:2000] if report_text else "(empty)")
 
-        with st.expander(t("misc.parsed_labs")):
-            st.json(labs_metrics)  # show whatever came back
+                if not report_text.strip():
+                    st.error(
+                        "Could not extract readable text from this file. "
+                        "If it is a scanned PDF, you may need OCR support."
+                    )
+                else:
+                    if output_lang == "auto":
+                        lang_code = detect_language_code(report_text, fallback=st.session_state.get("lang", "en"))
+                    else:
+                        lang_code = output_lang
 
-        # --- Red flags & risk
-        vitals_dict = patient.vitals.model_dump() if patient.vitals else {}
-        red_flags = collect_red_flags(patient.specialty, vitals_dict, ents_dict.get("symptoms", []), labs_struct)
-        risk_bucket = naive_risk_bucket(
-            ents_dict,
-            vitals_dict,
-            complaint=patient.complaint,
-            severity=patient.severity_1_10
-        )
+                    target_lang_name = SUPPORTED.get(lang_code, "English")
 
+                    result = generate_comment_conclusion_references(
+                        report_text_any_lang=report_text,
+                        llm_client=llm_client,
+                        target_lang_name=target_lang_name,
+                    )
+                    with st.expander("Debug: LLM raw output (if any)"):
+                        st.code(result.get("raw", "(no raw captured)"))
 
-        bucket_label = {
-            "Low": t("risk.low"),
-            "Moderate": t("risk.moderate"),
-            "High": t("risk.high"),
-        }.get(risk_bucket, risk_bucket)
+                    st.subheader("Comments")
+                    st.write(result.get("comments", ""))
 
-        # Vital sanity hints
-        for msg in vital_issues(vitals_dict):
-            st.warning(msg)
+                    st.subheader("Conclusion")
+                    st.write(result.get("conclusion", ""))
 
-        rf_local = _localize_red_flags(red_flags)
-        if rf_local:
-            st.error("🚩 " + t("report.red_flags") + ": " + "; ".join(rf_local))
+                    st.subheader("Feedback / Next steps")
+                    st.write(result.get("feedback", ""))
 
-        bucket_label = {
-            "Low": t("risk.low"),
-            "Moderate": t("risk.moderate"),
-            "High": t("risk.high"),
-        }.get(risk_bucket, risk_bucket)
-        st.info(t("misc.estimated_risk") + f": {bucket_label}")
+                    st.subheader("References")
+                    refs = result.get("references", []) or []
+                    if refs:
+                        for r in refs:
+                            st.markdown(f"- {r}")
+                    else:
+                        st.write("(None provided)")
 
-        # --- PubMed evidence (smarter query + curated fallback)
-        query = build_pubmed_query(patient.specialty, patient.complaint, ents.symptoms)
-        refs = search_pubmed(query, max_results=3)
-        st.subheader(" 📚 " + t("misc.evidence"))
-        if refs:
-            st.table(pd.DataFrame(refs))
-        else:
-            st.caption("No PubMed hits with current filters; using curated guideline references below.")
-        curated_refs = curated_guidelines(patient.specialty, patient.complaint, ents.symptoms)
+                    st.info(
+                        "Disclaimer: This output is for informational support only and is not a diagnosis. "
+                        "A licensed clinician must interpret the report in context."
+                    )
 
-        # --- LLM prompt (strict JSON demanded in PROMPT_TEMPLATE)
-        llm_client = LLMClient()
-        llm_client.provider = provider
+                    # Build a downloadable PDF for the generated results
+                    disclaimer_text = (
+                        "Disclaimer: This output is for informational support only and is not a diagnosis. "
+                        "A licensed clinician must interpret the report in context."
+                    )
 
-        condensed = {
-            "specialty": patient.specialty,
-            "complaint": patient.complaint,
-            "duration": patient.duration,
-            "severity": patient.severity_1_10,
-            "sex": patient.sex,
-            "age": patient.age,
-            "vitals": vitals_dict,
-            "entities": ents_dict,
-            "red_flags": red_flags,
-            "risk": risk_bucket,
-        }
-        prompt = PROMPT_TEMPLATE.render(
-            system_prompt=BASE_SYSTEM_PROMPT,
-            patient_json=json.dumps(condensed, ensure_ascii=False),
-            specialty=patient.specialty,
-            language_name=language_name()
-     )
+                    pdf_bytes = build_results_pdf_bytes(
+                        comments=result.get("comments", ""),
+                        conclusion=result.get("conclusion", ""),
+                        references=result.get("references", []) or [],
+                        disclaimer=disclaimer_text,
+                        title="Comments, Conclusion, References",
+                        page_size="A4",
+                    )
 
+                    st.download_button(
+                        label="Download Results PDF",
+                        data=pdf_bytes,
+                        file_name="report_results.pdf",
+                        mime="application/pdf",
+                    )
 
-        with st.spinner("Generating summary..."):
-            llm_text = llm_client.generate(prompt)
-
-        with st.expander("LLM raw output"):
-            st.code(llm_text or "(empty)")
-
-        # --- Prefer JSON, fallback to default rule-based summary
-        parsed = try_parse_llm_json(llm_text)
-        if parsed:
-            parsed = _translate_llm_json_if_needed(parsed, language_name(), llm_client)
-            overview        = parsed.get("overview", "")
-            key_findings    = parsed.get("key_findings", "")
-            differentials   = parsed.get("differentials", "")
-            risk_assessment = parsed.get("risk_assessment", "")
-            next_steps      = parsed.get("next_steps", "")
-            red_flags_txt   = parsed.get("red_flags", "")
-            limitations     = parsed.get("limitations", "")
-            references_txt  = compose_references_text("", refs, parsed.get("references"))
-        else:
-            defaults = default_sections(patient, ents, risk_bucket, red_flags)
-            overview        = defaults["overview"]
-            key_findings    = defaults["key_findings"]
-            differentials   = defaults["differentials"]
-            risk_assessment = defaults["risk_assessment"]
-            next_steps      = defaults["next_steps"]
-            red_flags_txt   = defaults["red_flags"]
-            limitations     = defaults["limitations"]
-            references_txt  = compose_references_text("", refs, None)
-
-        # --- Merge LLM-suggested triage with rules (optional)
-        def _norm_risk(s: Optional[str]):
-            if not s:
-                return None
-            s = s.lower()
-            if "high" in s:
-                return "High"
-            if "moderate" in s or "intermediate" in s:
-                return "Moderate"
-            if "low" in s:
-                return "Low"
-            return None
-
-        if parsed and use_llm_triage:
-            # Parse LLM "red_flags" (string or list)
-            lf_raw = parsed.get("red_flags", "")
-            if isinstance(lf_raw, str):
-                parts = [p.strip() for p in re.split(r"[\n;,•]+", lf_raw) if p.strip()]
-                llm_flags = parts
-            elif isinstance(lf_raw, list):
-                llm_flags = [str(x).strip() for x in lf_raw if str(x).strip()]
-            else:
-                llm_flags = []
-
-            # Merge: rules + LLM
-            red_flags = sorted(set(red_flags + llm_flags))
-
-            # Risk: take the stricter one
-            order = {"Low": 0, "Moderate": 1, "High": 2}
-            llm_risk = _norm_risk(parsed.get("risk_assessment"))
-            if llm_risk:
-                risk_bucket = ["Low", "Moderate", "High"][max(order.get(risk_bucket, 0), order[llm_risk])]
-
-            # Always reflect the final merged rule in the text shown
-            rf_local = _localize_red_flags(red_flags)
-            red_flags_txt = ", ".join(rf_local) if rf_local else t("default.no_redflags", "None elicited.")
-            risk_assessment = t("misc.estimated_risk") + f": {bucket_label}."
-
-        # References fallback to curated list if still empty
-        if (not references_txt or references_txt.strip() == "(None provided)") and curated_refs:
-            references_txt = "\n".join(curated_refs)
-
-        specialty_label = spec_label(patient.specialty)
-
-        # --- Render report via Jinja2 template
-        tmpl_path = os.path.join("templates", "report_template.j2")
-        with open(tmpl_path, "r", encoding="utf-8") as f:
-            report_tmpl = Template(f.read())
-        now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-        specialty_label = spec_label(patient.specialty)
-        report = report_tmpl.render(
-            title=t("report.title"),
-            specialty_label=specialty_label,
-            generated_at=now,
-            head_overview=t("report.overview"),
-            head_key_findings=t("report.key_findings"),
-            head_differentials=t("report.differentials"),
-            head_risk_assessment=t("report.risk_assessment"),
-            head_next_steps=t("report.next_steps"),
-            head_red_flags=t("report.red_flags"),
-            head_limitations=t("report.limitations"),
-            head_references=t("report.references"),
-            head_specialty=t("report.specialty"),
-            head_generated_at=t("report.generated_at"),
-            overview=overview,
-            key_findings=key_findings,
-            differentials=differentials,
-            risk_assessment=risk_assessment,
-            next_steps=next_steps,
-            red_flags=red_flags_txt,
-            limitations=limitations,
-            references=references_txt,
-        )
-        st.subheader("📝 Generated Report")
-        st.markdown(report, unsafe_allow_html=True)
-
-        # --- Optional logging
-        if anonymize:
-            pid_stored = hashlib.sha256((patient.patient_id or "").encode()).hexdigest()[:10] if patient.patient_id else None
-        else:
-            pid_stored = patient.patient_id
-
-        record = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "patient_id": pid_stored,
-            "specialty": patient.specialty,
-            "age": patient.age,
-            "sex": patient.sex,
-            "race_ethnicity": patient.race_ethnicity,
-            "weight": patient.weight_kg,
-            "height": patient.height_cm,
-            "bmi": patient.bmi,
-            "complaint": patient.complaint,
-            "duration": patient.duration,
-            "severity": patient.severity_1_10,
-            "assoc_symptoms": patient.associated_symptoms,
-            "pmh": patient.pmh,
-            "surg_hx": patient.surgical_history,
-            "meds": patient.medications,
-            "allergies": patient.allergies,
-            "fam_hx": patient.family_history,
-            "smoking": patient.smoking_status,
-            "alcohol": patient.alcohol_consumption,
-            "drugs": patient.illicit_drug_use,
-            "vitals": json.dumps(vitals_dict),
-            "labs": patient.labs,
-            "imaging": patient.imaging,
-            "other_tests": patient.other_tests,
-            "entities": json.dumps(ents_dict),
-            "pubmed_refs": json.dumps(refs),
-            "report_raw": llm_text,
-            "report_rendered": report,
-        }
-        try:
-            log_record(record)
-            st.success("Saved (opt-in logging).")
-        except Exception as e:
-            st.warning(f"Could not save: {e}")
-
-    except Exception as e:
-        st.error(f"Error: {e}")
